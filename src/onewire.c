@@ -85,9 +85,61 @@ static inline uint32_t resetbus(void) {
 	return devicepresent;
 }
 
+static inline void write_bit(int bit) {
+	if (bit) {
+		// Write '1' bit
+		setpin0();
+		BusyWait(TICKS_US(6));
+		setpinhiz();
+		BusyWait(TICKS_US(64));
+	} else {
+		// Write '0' bit
+		setpin0();
+		BusyWait(TICKS_US(60));
+		setpinhiz();
+		BusyWait(TICKS_US(10));
+	}
+}
+
+static inline uint32_t read_bit() {
+	uint32_t bit;
+	setpin0();
+	BusyWait(TICKS_US(6));
+	setpinhiz();
+	BusyWait(TICKS_US(9));
+	bit = getpin() & 0x01;
+	BusyWait(TICKS_US(55));
+
+	return bit;
+}
+
+static inline void write_byte(uint8_t byte)
+{
+	int i;
+	for (i = 0; i < 8; i++) {
+		write_bit(byte & 1);
+		byte >>= 1;
+	}
+}
+
+static inline uint32_t read_byte()
+{
+	int i;
+	uint32_t byte = 0;
+	for (i = 0; i < 8; i++) {
+		// shift the result to get it ready for the next bit
+		byte >>= 1;
+
+		// if result is one, then set MS bit
+		if (read_bit()) byte |= 0x80;
+	}
+	return byte;
+}
+
 #define OW_SEARCH_ROM (0xf0)
 #define OW_READ_ROM (0x33)
 #define OW_MATCH_ROM (0x55)
+#define OW_COMMAND_START (0x66)
 #define OW_SKIP_ROM (0xcc)
 #define OW_CONVERT_T (0x44)
 #define OW_WRITE_SCRATCHPAD (0x4e)
@@ -143,6 +195,53 @@ static uint8_t docrc8(uint8_t value) {
 	// TEST BUILD
 	crc8 = dscrc_table[crc8 ^ value];
 	return crc8;
+}
+
+static int DS28E18RunCommand(uint8_t *command, int32_t command_size, uint8_t *result_data) {
+	uint32_t result_data_length;
+
+	write_byte(OW_COMMAND_START);
+	write_byte(command_size);
+	for (uint32_t i = 0; i < command_size; i++) {
+		write_byte(command[i]);
+	}
+
+	// TODO: check CRC16 value
+	read_byte();       // read CRC16
+	read_byte();       // read CRC16
+	write_byte(0xAA);  // release
+
+	// in case of running Sequencer, 3 ms
+	if (command[0] == 0x33) {
+		BusyWait(TICKS_MS(3));
+	} else {
+		BusyWait(TICKS_MS(SPU_DELAY_tOP));
+	}
+
+	read_byte();  // Dummy(FF)
+	result_data_length = read_byte();
+	if (result_data_length == 0xFF) {
+		printf("\nError: 1-Wire Communication Error");
+		return false;
+	}
+
+	for (uint32_t i = 0; i < result_data_length; i++) {
+		result_data[i] = read_byte();
+	}
+
+	return true;
+}
+
+/*
+ * Populate unique ROM ID of all devices on 1-Wire line
+ * using Write GPIO Configuration command (ignore result)
+ */
+static void DS28E18First() {
+	uint8_t response[1];
+	resetbus();
+	write_byte(OW_SKIP_ROM);
+	uint8_t cmd[] = {0x05, 0x83, 0x0B, 0x03, 0xA5, 0x0F};
+	DS28E18RunCommand(cmd, sizeof(cmd), response);
 }
 
 /* Perform the 1-Wire Search Algorithm on the 1-Wire bus using the existing
@@ -254,6 +353,10 @@ static int OWSearch() {
  * FALSE : no device present
  */
 static int OWFirst() {
+#ifdef USE_DS28E18
+	DS28E18First();
+#endif
+
 	// reset the search state
 	LastDiscrepancy = 0;
 	LastDeviceFlag = false;
@@ -281,11 +384,50 @@ static void selectdevbyidx(int idx) {
 	}
 }
 
+static uint8_t run_cmd[] = {
+	0x33,  // Run Sequencer
+	0x00,  // ADDR_LO
+	0x18,  // SLEN_LO + ADDR_HI (12 bytes)
+	0x00,  // ADDR_HI
+};
+static uint8_t read_cmd[] = {
+	0x22,  // Read Sequencer
+	0x07,  // ADDR_LO
+	0x08,  // SLEN_LO + ADDR_HI (4 bytes)
+};
+
+static void DS28E18RunSequencer(int idx, uint8_t *result_data) {
+	uint8_t response[5];
+
+	selectdevbyidx(idx);
+	DS28E18RunCommand(run_cmd, 4, response);
+
+	selectdevbyidx(idx);
+	DS28E18RunCommand(read_cmd, 3, response);
+	for (uint32_t i = 0; i < 4; i++) { // Read four bytes
+		result_data[i] = response[i + 1];
+	}
+}
+
 static int32_t OneWire_Work(void) {
 	static uint8_t mystate = 0;
 	uint8_t scratch[9];
 	int32_t retval = 0;
 
+#ifdef USE_DS28E18
+	for (int i = 0; i < numowdevices; i++) {
+		uint32_t save = VIC_DisableIRQ();
+		DS28E18RunSequencer(i, scratch);
+		VIC_RestoreIRQ(save);
+
+		int16_t tmp = scratch[0] << 8 | scratch[1];
+		devreadout[i] = tmp;
+		tmp = scratch[2] << 8 | scratch[3];
+		extrareadout[i] = tmp;
+	}
+
+	retval = TICKS_MS(100);
+#else
 	if (mystate == 0) {
 		uint32_t save = VIC_DisableIRQ();
 		if (resetbus()) {
@@ -315,6 +457,7 @@ static int32_t OneWire_Work(void) {
 	} else {
 		retval = -1;
 	}
+#endif
 
 	return retval;
 }
@@ -379,6 +522,56 @@ uint32_t OneWire_Init(void) {
 				VIC_RestoreIRQ( save );
 				tcidmapping[tcid] = iter; // Keep track of the ID mapping
 				printf(" [Thermocouple interface, ID %x]",tcid);
+#ifdef USE_DS28E18
+			} else {
+				uint8_t cmd[32];
+				uint8_t response[1];
+
+				save = VIC_DisableIRQ();
+
+				// issue device
+				selectdevbyidx(iter);
+				cmd[0] = 0x83;
+				cmd[1] = 0x0B;
+				cmd[2] = 0x03;
+				cmd[3] = 0xA5;
+				cmd[4] = 0x0F;
+				DS28E18RunCommand(cmd, 5, response);
+
+				// clear POR
+				selectdevbyidx(iter);
+				cmd[0] = 0x7A;
+				DS28E18RunCommand(cmd, 1, response);
+
+				// set SPI mode 0, 400kHz
+				selectdevbyidx(iter);
+				cmd[0] = 0x55;
+				cmd[1] = 0x09;
+				DS28E18RunCommand(cmd, 2, response);
+
+				// write Sequencer
+				selectdevbyidx(iter);
+				cmd[0]  = 0x11;  // Write Sequencer
+				cmd[1]  = 0x00;  // ADDR_LO
+				cmd[2]  = 0x00;  // ADDR_HI
+				cmd[3]  = 0x01;  //  ss_high
+				cmd[4]  = 0xDD;  //  delay
+				cmd[5]  = 0x01;  //  2ms
+				cmd[6]  = 0x80;  //  ss_low
+				cmd[7]  = 0xC0;  //  SPI write/read Byte
+				cmd[8]  = 0x00;  //  write len
+				cmd[9]  = 0x04;  //  read len
+				cmd[10] = 0xff;  //  read data(dummy)
+				cmd[11] = 0xff;  //  read data(dummy)
+				cmd[12] = 0xff;  //  read data(dummy)
+				cmd[13] = 0xff;  //  read data(dummy)
+				cmd[14] = 0x01;  //  ss_high
+				DS28E18RunCommand(cmd, 15, response);
+
+				VIC_RestoreIRQ( save );
+				tcidmapping[iter] = iter; // Keep track of the ID mapping
+				printf(" [Thermocouple interface, ID %x]", iter);
+#endif
 			}
 		}
 	} else {

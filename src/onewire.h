@@ -1,6 +1,8 @@
 #ifndef ONEWIRE_H_
 #define ONEWIRE_H_
 
+#define SPU_DELAY_tOP   1  // ms
+
 uint32_t OneWire_Init( void );
 int OneWire_PerformTemperatureConversion(void);
 float OneWire_GetTempSensorReading(void);
