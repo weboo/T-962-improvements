@@ -82,6 +82,8 @@ int main(void) {
 	char buf[22];
 	int len;
 
+	//Turn off FAN & Heater
+	IO_TurnOff_FAN_Heater();
 	IO_JumpBootloader();
 
 	PLLCFG = (1 << 5) | (4 << 0); //PLL MSEL=0x4 (+1), PSEL=0x1 (/2) so 11.0592*5 = 55.296MHz, Fcco = (2x55.296)*2 = 221MHz which is within 156 to 320MHz

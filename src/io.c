@@ -133,6 +133,14 @@ int IO_Partinfo(char* buf, int n, char* format) {
 	return snprintf(buf, n, format, partstrptr, (int)partrev);
 }
 
+void IO_TurnOff_FAN_Heater(void)
+{
+	//Turn off FAN & Heater using legacy registers so they stay off
+	//Fan = PIN0.8, Heater = PIN0.9
+	IODIR0 = (1 << 8) | (1 << 9);
+	IOSET0 = (1 << 8) | (1 << 9);
+}
+
 void IO_JumpBootloader(void) {
 	/* Hold F1-Key at boot to force ISP mode */
 	if ((IOPIN0 & (1 << 23)) == 0) {
@@ -144,11 +152,7 @@ void IO_JumpBootloader(void) {
 		// Bootloader must use legacy mode IO if you call this later too, so do:
 		// SCS = 0;
 
-		// Turn off FAN & Heater using legacy registers so they stay off during bootloader
-		// Fan = PIN0.8
-		// Heater = PIN0.9
-		IODIR0 = (1 << 8) | (1 << 9);
-		IOSET0 = (1 << 8) | (1 << 9);
+		IO_TurnOff_FAN_Heater();
 
 		//Re-enter ISP Mode, this function will never return
 		command[0] = IAP_REINVOKE_ISP;
